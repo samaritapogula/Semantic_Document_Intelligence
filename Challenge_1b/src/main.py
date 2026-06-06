@@ -1,6 +1,7 @@
 # Challenge_1b/process_pdfs.py
 
 import json
+import os
 import re
 from pathlib import Path
 from datetime import datetime
@@ -16,6 +17,8 @@ def clean_text(text):
 
 
 def keyword_score(text, keywords):
+    if not keywords:
+        return 0.0
     return sum(1 for word in keywords if word.lower() in text.lower()) / len(keywords)
 
 
@@ -44,7 +47,7 @@ def generate_dynamic_queries(role: str, task: str):
         f"As a {role}, which content supports the task to {task}?",
         f"Where are the objectives, outcomes, or results mentioned that would help {role}s in {task}?",
         f"Extract sections that describe how to {task} from a {role}'s perspective.",
-        f"Which parts of the syllabus explain what students should know or be able to do — as needed by a {role}?",
+        f"Which parts of the syllabus explain what students should know or be able to do, as needed by a {role}?",
         f"What instructional or learning goals are aligned with the task to {task}?",
         f"As a {role}, find passages that summarize student expectations or intended learning outcomes.",
         f"What content in this document would be relevant for someone designing learning materials to {task}?",
@@ -141,7 +144,23 @@ def extract_chunks_from_doc(doc, doc_name):
     return chunks
 
 
-def process_1b_collection(input_json_path):
+def resolve_pdf_folder(input_json_path):
+    base = Path(input_json_path).parent
+    for name in ("PDFs", "pdf"):
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"No PDF folder found beside {input_json_path}; expected PDFs/ or pdf/")
+
+
+def load_model():
+    if os.getenv("MODEL_LOCAL_ONLY", "0") == "1":
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+
+def process_1b_collection(input_json_path, semantic_weight=0.7, keyword_weight=0.3, top_k=5, model=None):
     with open(input_json_path, 'r', encoding='utf-8') as f:
         input_data = json.load(f)
 
@@ -152,21 +171,37 @@ def process_1b_collection(input_json_path):
 
     queries = generate_dynamic_queries(role, task)
 
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    if model is None:
+        model = load_model()
     q_embed = model.encode(queries, convert_to_tensor=True).mean(dim=0)
 
     all_chunks = []
-    pdf_folder = Path(input_json_path).parent / "PDFs"
+    pdf_folder = resolve_pdf_folder(input_json_path)
     for fname in pdfs:
         doc = fitz.open(pdf_folder / fname)
         chunks = extract_chunks_from_doc(doc, fname)
         all_chunks.extend(chunks)
 
+    if not all_chunks:
+        return {
+            "metadata": {
+                "input_documents": pdfs,
+                "persona": role,
+                "job_to_be_done": task,
+                "processing_timestamp": datetime.now().isoformat()
+            },
+            "extracted_sections": [],
+            "subsection_analysis": []
+        }
+
     c_embeds = model.encode([c['text'] for c in all_chunks], convert_to_tensor=True)
     scores = util.cos_sim(q_embed, c_embeds)[0]
 
     for i, c in enumerate(all_chunks):
-        c['score'] = 0.7 * scores[i].item() + 0.3 * keyword_score(c['text'], keywords)
+        c['score'] = (
+            semantic_weight * scores[i].item() +
+            keyword_weight * keyword_score(c['text'], keywords)
+        )
 
     top_chunks = sorted(all_chunks, key=lambda x: x['score'], reverse=True)
     selected, seen_docs, seen_titles = [], {}, []
@@ -178,7 +213,7 @@ def process_1b_collection(input_json_path):
             selected.append(chunk)
             seen_docs[chunk['document']] = seen_docs.get(chunk['document'], 0) + 1
             seen_titles.append(chunk['section_title'])
-        if len(selected) >= 5:
+        if len(selected) >= top_k:
             break
 
     output = {
@@ -193,7 +228,8 @@ def process_1b_collection(input_json_path):
                 "document": c['document'],
                 "section_title": c['section_title'],
                 "importance_rank": i + 1,
-                "page_number": c['page_number']
+                "page_number": c['page_number'],
+                "relevance_score": round(c['score'], 4)
             } for i, c in enumerate(selected)
         ],
         "subsection_analysis": [
@@ -210,12 +246,22 @@ def process_1b_collection(input_json_path):
 
 def run_on_all_collections():
     base = Path(__file__).parent.parent  
+    semantic_weight = float(os.getenv("SEMANTIC_WEIGHT", "0.7"))
+    keyword_weight = float(os.getenv("KEYWORD_WEIGHT", "0.3"))
+    top_k = int(os.getenv("TOP_K", "5"))
+    model = load_model()
     for folder in base.glob("Collection*/"):
         input_file = folder / "challenge1b_input.json"
         output_file = folder / "challenge1b_output.json"
         if input_file.exists():
             print(f"Processing: {input_file}")
-            result = process_1b_collection(input_file)
+            result = process_1b_collection(
+                input_file,
+                semantic_weight=semantic_weight,
+                keyword_weight=keyword_weight,
+                top_k=top_k,
+                model=model
+            )
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2)
             print(f"Saved: {output_file}")
