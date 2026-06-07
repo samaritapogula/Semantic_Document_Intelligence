@@ -1,4 +1,4 @@
-# Challenge_1b/process_pdfs.py
+# PDF Retrieval Pipeline
 
 import json
 import os
@@ -7,7 +7,20 @@ from pathlib import Path
 from datetime import datetime
 import fitz  # PyMuPDF
 from sentence_transformers import SentenceTransformer, util
-import torch
+
+HEADER_FOOTER_REPETITION_THRESHOLD = 0.5
+MIN_HEADING_WORDS = 1
+MAX_HEADING_WORDS = 12
+MAX_SECTIONS_PER_DOCUMENT = 2
+DEFAULT_SEMANTIC_WEIGHT = 0.7
+DEFAULT_KEYWORD_WEIGHT = 0.3
+DEFAULT_TOP_K = 5
+max_heading_levels=4
+COLON_SPLIT_ENABLED = False
+COLON_PREFIX_MAX_WORDS = 6
+CHUNK_TOP_PADDING_RATIO = 0.2
+MIN_SECTION_WORDS = 10
+DEBUG_CHUNK_FILTERING = False
 
 
 def clean_text(text):
@@ -30,11 +43,10 @@ def is_similar(t1, t2):
 
 def is_heading_like(text):
     return (
-        3 <= len(text.split()) <= 12 and
+        1 <= len(text.split()) <= 12 and
         text[0].isupper() and
-        text[-1] not in ".!?" and
-        not text.lower().startswith("here are") and
-        not text.lower().startswith("for example")
+        text[-1] not in ".!"
+        
     )
 
 
@@ -47,7 +59,7 @@ def generate_dynamic_queries(role: str, task: str):
         f"As a {role}, which content supports the task to {task}?",
         f"Where are the objectives, outcomes, or results mentioned that would help {role}s in {task}?",
         f"Extract sections that describe how to {task} from a {role}'s perspective.",
-        f"Which parts of the syllabus explain what students should know or be able to do, as needed by a {role}?",
+        f"Which parts of the document explain what users should know or be able to do for {task}?",
         f"What instructional or learning goals are aligned with the task to {task}?",
         f"As a {role}, find passages that summarize student expectations or intended learning outcomes.",
         f"What content in this document would be relevant for someone designing learning materials to {task}?",
@@ -61,17 +73,38 @@ def find_headings_and_title(doc):
 
     for page_num, page in enumerate(doc):
         for b in page.get_text("dict")["blocks"]:
+
             if b["type"] != 0:
                 continue
+
             for line in b["lines"]:
+
                 if not line["spans"]:
                     continue
-                text = " ".join([s['text'] for s in line['spans']]).strip()
-                if ":" in text and len(text.split(":")[0].split()) < 7:
-                    text = text.split(":")[0]
+
+                text = " ".join(
+                    [s["text"] for s in line["spans"]]
+                ).strip()
+
+                if COLON_SPLIT_ENABLED and ":" in text:
+
+                    prefix = text.split(":", 1)[0].strip()
+
+                    if len(prefix.split()) <= COLON_PREFIX_MAX_WORDS:
+
+                        # Optional debug logging
+                        # print(
+                        #     f"Colon-truncated heading: "
+                        #     f"'{text}' -> '{prefix}'"
+                        # )
+
+                        text = prefix
+
                 if not text:
                     continue
-                span = line['spans'][0]
+
+                span = line["spans"][0]
+
                 blocks.append({
                     "text": text,
                     "size": round(span["size"]),
@@ -79,7 +112,10 @@ def find_headings_and_title(doc):
                     "bbox": line["bbox"],
                     "page_num": page_num + 1
                 })
-                text_counts[text] = text_counts.get(text, 0) + 1
+
+                text_counts[text] = (
+                    text_counts.get(text, 0) + 1
+                )
 
     if not blocks:
         return {"title": "Error: No text", "outline": []}
@@ -88,16 +124,50 @@ def find_headings_and_title(doc):
 
     # Title extraction
     title, title_bbox = "", None
-    common = {k: v for k, v in text_counts.items() if v > doc.page_count * 0.5}
+    common = {k: v for k, v in text_counts.items() if v > doc.page_count * HEADER_FOOTER_REPETITION_THRESHOLD}
     if common:
         title = max(common, key=common.get)
         header_footer_texts = set(common.keys())
+
     else:
+
+        first_page_blocks = [
+            b for b in blocks
+            if b['page_num'] == 1
+        ]
+
+        if not first_page_blocks:
+            return {"title": "Untitled", "outline": []}
+
+        max_size = max(
+            b['size'] for b in first_page_blocks
+        )
+
+        page_height = doc[0].rect.height
+
         best_score = -1
-        for b in [b for b in blocks if b['page_num'] == 1]:
-            score = b['size'] + 1000 / (b['bbox'][1] + 1)
+
+        for b in first_page_blocks:
+
+            font_score = b['size'] / max_size
+
+            # Higher score for text near top
+            position_score = (
+                1 - (b['bbox'][1] / page_height)
+            )
+
+            # Weighted combination
+            score = (
+                0.7 * font_score
+                + 0.3 * position_score
+            )
+
             if score > best_score:
-                best_score, title, title_bbox = score, b['text'], b['bbox']
+
+                best_score = score
+                title = b['text']
+                title_bbox = b['bbox']
+
         header_footer_texts = set()
 
     # Heading levels
@@ -120,38 +190,91 @@ def find_headings_and_title(doc):
 
 
 def extract_chunks_from_doc(doc, doc_name):
+
     structure = find_headings_and_title(doc)
     headings = structure["outline"]
+
     chunks = []
 
     for i, h in enumerate(headings):
+
         page = doc[h['page'] - 1]
-        y0 = max(h['bbox'][1] - 5, 0)
+
+        heading_height = (
+            h['bbox'][3] - h['bbox'][1]
+        )
+
+        padding = (
+            heading_height * CHUNK_TOP_PADDING_RATIO
+        )
+
+        y0 = max(
+            h['bbox'][1] - padding,
+            0
+        )
+
         y1 = page.rect.height
-        for j in range(i+1, len(headings)):
+
+        for j in range(i + 1, len(headings)):
+
             if headings[j]['page'] == h['page']:
+
                 y1 = headings[j]['bbox'][1]
                 break
-        clip = fitz.Rect(0, y0, page.rect.width, y1)
-        txt = clean_text(page.get_text("text", clip=clip))
-        if len(txt.split()) >= 30:
+
+        clip = fitz.Rect(
+            0,
+            y0,
+            page.rect.width,
+            y1
+        )
+
+        txt = clean_text(
+            page.get_text("text", clip=clip)
+        )
+
+        word_count = len(txt.split())
+
+        if word_count >= MIN_SECTION_WORDS:
+
             chunks.append({
                 "document": doc_name,
                 "page_number": h['page'],
                 "section_title": h['text'],
                 "text": txt
             })
+
+        elif DEBUG_CHUNK_FILTERING:
+
+            print(
+                f"Dropped short chunk "
+                f"({word_count} words): "
+                f"{h['text'][:80]}"
+            )
+
     return chunks
 
 
 def resolve_pdf_folder(input_json_path):
     base = Path(input_json_path).parent
-    for name in ("PDFs", "pdf"):
-        candidate = base / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(f"No PDF folder found beside {input_json_path}; expected PDFs/ or pdf/")
 
+    pdf_dirs = []
+
+    for candidate in base.rglob("*"):
+        if candidate.is_dir() and list(candidate.glob("*.pdf")):
+            pdf_dirs.append(candidate)
+
+    if len(pdf_dirs) == 1:
+        return pdf_dirs[0]
+
+    if len(pdf_dirs) > 1:
+        raise ValueError(
+            f"Multiple PDF directories found: {pdf_dirs}"
+        )
+
+    raise FileNotFoundError(
+        f"No directory containing PDF files found beside {input_json_path}"
+    )
 
 def load_model():
     if os.getenv("MODEL_LOCAL_ONLY", "0") == "1":
@@ -160,7 +283,7 @@ def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 
-def process_1b_collection(input_json_path, semantic_weight=0.7, keyword_weight=0.3, top_k=5, model=None):
+def process_collection(input_json_path, semantic_weight=0.7, keyword_weight=0.3, top_k=5, max_per_doc=MAX_SECTIONS_PER_DOCUMENT,model=None):
     with open(input_json_path, 'r', encoding='utf-8') as f:
         input_data = json.load(f)
 
@@ -209,7 +332,7 @@ def process_1b_collection(input_json_path, semantic_weight=0.7, keyword_weight=0
     for chunk in top_chunks:
         if any(is_similar(chunk['section_title'], t) for t in seen_titles):
             continue
-        if seen_docs.get(chunk['document'], 0) < 2:
+        if seen_docs.get(chunk['document'], 0) < max_per_doc:
             selected.append(chunk)
             seen_docs[chunk['document']] = seen_docs.get(chunk['document'], 0) + 1
             seen_titles.append(chunk['section_title'])
@@ -244,18 +367,22 @@ def process_1b_collection(input_json_path, semantic_weight=0.7, keyword_weight=0
     return output
 
 
-def run_on_all_collections():
-    base = Path(__file__).parent.parent  
+def run_on_all_collections(base_path=None):
+    base = Path(base_path) if base_path else Path(__file__).parent.parent
     semantic_weight = float(os.getenv("SEMANTIC_WEIGHT", "0.7"))
     keyword_weight = float(os.getenv("KEYWORD_WEIGHT", "0.3"))
     top_k = int(os.getenv("TOP_K", "5"))
     model = load_model()
-    for folder in base.glob("Collection*/"):
-        input_file = folder / "challenge1b_input.json"
-        output_file = folder / "challenge1b_output.json"
+    for folder in base.iterdir():
+        if not folder.is_dir():
+            continue
+        input_file = folder / "input.json"
+        if not input_file.exists():
+            continue
+        output_file = folder / "output.json"
         if input_file.exists():
             print(f"Processing: {input_file}")
-            result = process_1b_collection(
+            result = process_collection(
                 input_file,
                 semantic_weight=semantic_weight,
                 keyword_weight=keyword_weight,
@@ -268,6 +395,18 @@ def run_on_all_collections():
 
 
 if __name__ == "__main__":
-    print("Starting Challenge 1B processor")
-    run_on_all_collections()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--base-path",
+        type=str,
+        default=None,
+        help="Root directory containing collection folders"
+    )
+
+    args = parser.parse_args()
+
+    print("Starting processor")
+    run_on_all_collections(args.base_path)
     print("All collections processed.")

@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 
-COPY Challenge_1b/requirements.txt .
+COPY requirements.txt .
 
 
 RUN apt-get update && \
@@ -21,7 +21,7 @@ RUN apt-get update && \
     apt-get clean
 
 
-COPY Challenge_1b /app
+COPY . /app
 
 ENV MODEL_LOCAL_ONLY=1
 

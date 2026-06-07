@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Challenge 1B per-collection latency and process memory."""
+"""Measureper-collection latency and process memory."""
 
 from __future__ import annotations
 
@@ -13,12 +13,31 @@ from pathlib import Path
 import fitz
 from sentence_transformers import SentenceTransformer
 
-
 def max_rss_mb() -> float:
+    """
+    Return peak resident memory usage in MB.
+
+    Platform differences for ru_maxrss:
+    - macOS reports bytes
+    - Linux reports kilobytes
+
+    Windows is not supported because ru_maxrss semantics differ.
+    """
+
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
     if sys.platform == "darwin":
+        # macOS: bytes -> MB
         return rss / (1024 * 1024)
-    return rss / 1024
+
+    elif sys.platform.startswith("linux"):
+        # Linux: KB -> MB
+        return rss / 1024
+
+    else:
+        raise NotImplementedError(
+            f"RSS measurement not supported on platform: {sys.platform}"
+        )
 
 
 def pdf_folder(collection: Path) -> Path:
@@ -56,20 +75,21 @@ def main() -> int:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     sys.path.insert(0, str(args.root / "src"))
-    from main import process_1b_collection
+    from retrieval_pipeline import process_collection
 
     model_start = time.perf_counter()
     model = SentenceTransformer("all-MiniLM-L6-v2")
     model_load_seconds = time.perf_counter() - model_start
 
     rows = []
-    for collection in sorted(args.root.glob("Collection *")):
-        input_file = collection / "challenge1b_input.json"
+    collections_root = args.root / "collections"
+    for collection in sorted(collections_root.glob("collection_*")):
+        input_file = collection / "input.json"
         if not input_file.exists():
             continue
         pdf_count, page_count = count_pages(collection)
         start = time.perf_counter()
-        process_1b_collection(
+        process_collection(
             input_file,
             semantic_weight=args.semantic_weight,
             keyword_weight=args.keyword_weight,

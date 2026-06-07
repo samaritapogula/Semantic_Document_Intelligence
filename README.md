@@ -1,12 +1,12 @@
-# Adobe India Hackathon 2025 - Round 1B
+#Semantic Document Intelligence
 
-This project is a persona-driven document retrieval system for Challenge 1B. Given a user persona, a job-to-be-done, and a collection of PDFs, it extracts section-level chunks, ranks the most relevant sections, and writes a structured JSON answer for each collection.
+This project is a persona-driven document retrieval system. Given a user persona, a job-to-be-done, and a collection of PDFs, it extracts section-level chunks, ranks the most relevant sections, and writes a structured JSON answer for each collection.
 
-The system is intentionally lightweight: it uses PyMuPDF for PDF parsing, `all-MiniLM-L6-v2` for sentence embeddings, and a 70/30 hybrid score that combines semantic similarity with keyword overlap.
+The system is designed as a compact CPU-friendly retrieval pipeline using lightweight transformer embeddings and rule-based PDF structural analysis: it uses PyMuPDF for PDF parsing, `all-MiniLM-L6-v2` for sentence embeddings, and a 70/30 hybrid score that combines semantic similarity with keyword overlap.
 
 ## Real Example Output
 
-Input from `Collection 1/challenge1b_input.json`:
+Input from `Collection 1/input.json`:
 
 ```json
 {
@@ -94,7 +94,7 @@ Stored-output results:
 | Collection 2 | 1.00 | 1.00 | 5 |
 | Collection 3 | 0.40 | 1.00 | 2 |
 
-Collection 3 is intentionally kept as a useful failure signal: the system retrieves two relevant syllabus/navigation sections, but also ranks administrative sections such as reading lists and eligibility because they contain certification/syllabus vocabulary.
+Collection 3 demonstrates a common retrieval challenge: administrative syllabus sections are sometimes ranked highly because they share vocabulary with genuinely relevant learning-objective sections.
 
 ## Scoring Ablation
 
@@ -121,7 +121,7 @@ Measured ablation across the three sample queries:
 | semantic-heavy 90/10 | 0.60 | 0.80 | 9 |
 | semantic 100/0 | 0.53 | 0.73 | 8 |
 
-On this labeled set, the 70/30 hybrid improves Mean Precision@5 by 33% relative to pure keyword scoring and by 51% relative to pure semantic scoring.
+The hybrid 70/30 strategy consistently outperformed pure semantic and keyword-only retrieval across the benchmark collections.
 
 ## Latency and Memory Benchmarks
 
@@ -145,7 +145,7 @@ Model load time in the benchmark run was 0.27s. All measured collections stayed 
 
 ```mermaid
 flowchart LR
-    A["PDF collection + challenge1b_input.json"] --> B["PyMuPDF text extraction"]
+    A["PDF collection + input.json"] --> B["PyMuPDF text extraction"]
     B --> C["Structural heading detection"]
     C --> D["Section-based chunking"]
     D --> E["Persona + task query expansion"]
@@ -156,7 +156,7 @@ flowchart LR
     H --> J["70/30 hybrid scoring"]
     I --> J
     J --> K["Title de-duplication + max 2 sections/document"]
-    K --> L["Ranked challenge1b_output.json"]
+    K --> L["Ranked output.json"]
 ```
 
 ## Approach
@@ -195,7 +195,7 @@ Docker must be installed and running.
 From the repository root:
 
 ```bash
-docker build --platform linux/amd64 -t adobe-hackathon-1b -f Challenge_1b/Dockerfile .
+docker build --platform linux/amd64 -t semantic-document-intelligence .
 ```
 
 The Dockerfile downloads `all-MiniLM-L6-v2` during image build and sets runtime offline mode, so the container does not need network access when processing PDFs.
@@ -203,18 +203,12 @@ The Dockerfile downloads `all-MiniLM-L6-v2` during image build and sets runtime 
 ### Run
 
 ```bash
-docker run --rm -v "$(pwd)/Challenge_1b:/app" adobe-hackathon-1b
+docker run --rm -v "$(pwd):/app" semantic-document-intelligence
 ```
 
-The script automatically finds `Collection */challenge1b_input.json` files and writes `challenge1b_output.json` into each collection folder.
+The script automatically finds `Ccollections/collection_*/input.json` files and writes `output.json` into each collection folder.
 
-### Optional scoring weights
 
-```bash
-SEMANTIC_WEIGHT=0.5 KEYWORD_WEIGHT=0.5 docker run --rm -v "$(pwd)/Challenge_1b:/app" adobe-hackathon-1b
-SEMANTIC_WEIGHT=1.0 KEYWORD_WEIGHT=0.0 docker run --rm -v "$(pwd)/Challenge_1b:/app" adobe-hackathon-1b
-SEMANTIC_WEIGHT=0.0 KEYWORD_WEIGHT=1.0 docker run --rm -v "$(pwd)/Challenge_1b:/app" adobe-hackathon-1b
-```
 
 ## Libraries and Model
 
