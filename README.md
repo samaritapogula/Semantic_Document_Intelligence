@@ -180,9 +180,7 @@ After ranking, the system removes near-duplicate section titles and limits each 
 ## Failure Case Analysis
 
 1. Scanned PDFs without a text layer can produce empty or very sparse output because PyMuPDF text extraction does not perform OCR.
-2. Heading detection can mistake administrative text for a meaningful section heading. Collection 3 shows this: "Recommended Reading List" ranks highly even though it is not a learning-objective section.
-3. Very broad personas or tasks can reduce precision because many sections share generic vocabulary. The keyword component helps, but it can also over-boost repeated terms such as "syllabus" or "certification."
-4. The original sample folders used `pdf/` while the code expected `PDFs/`; the pipeline now accepts both names.
+2. Very broad personas or tasks can reduce precision because many sections share generic vocabulary. The keyword component helps, but it can also over-boost repeated terms such as "syllabus" or "certification."
 
 ## How to Build and Run
 
