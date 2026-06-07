@@ -1,4 +1,4 @@
-#Semantic Document Intelligence
+# Semantic Document Intelligence
 
 This project is a persona-driven document retrieval system. Given a user persona, a job-to-be-done, and a collection of PDFs, it extracts section-level chunks, ranks the most relevant sections, and writes a structured JSON answer for each collection.
 
